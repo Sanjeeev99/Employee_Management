@@ -1,0 +1,15 @@
+# Environment & secret files
+.env
+.env.local
+application-local.properties
+
+# Java / Spring Boot / Eclipse
+target/
+.classpath
+.project
+.settings/
+
+# React / Node
+node_modules/
+dist/
+build/
