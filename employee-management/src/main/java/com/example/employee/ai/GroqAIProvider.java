@@ -3,8 +3,10 @@ import org.springframework.beans.factory.annotation.Value;
 
 import com.example.employee.dto.EmployeeAIResponse;
 import com.example.employee.entity.Employee;
+import com.example.employee.exception.GuardrailViolationException;
 import com.example.employee.service.DocumentRetrievalService;
 import com.example.employee.service.EmployeeService;
+import com.example.employee.service.GuardrailService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 //import com.google.api.client.util.Value;
 
@@ -25,6 +27,7 @@ public class GroqAIProvider implements AIProvider {
     private final EmployeeService employeeService;
     private final ObjectMapper objectMapper;
     private final String apiKey;
+    private final GuardrailService guardrailService;
 
     private static final String URL =
             "https://api.groq.com/openai/v1/chat/completions";
@@ -32,17 +35,21 @@ public class GroqAIProvider implements AIProvider {
     private static final String MODEL =
             "openai/gpt-oss-20b";
 
-    public GroqAIProvider(EmployeeService employeeService,  ConversationStore conversationStore, DocumentRetrievalService documentRetrievalService, @Value("${groq.api.key}") String apiKey) {
+    public GroqAIProvider(EmployeeService employeeService,  ConversationStore conversationStore, DocumentRetrievalService documentRetrievalService, GuardrailService guardrailService, @Value("${groq.api.key}") String apiKey) {
         this.restTemplate = new RestTemplate();
         this.employeeService = employeeService;
         this.objectMapper = new ObjectMapper();
         this.conversationStore =  conversationStore;
         this.documentRetrievalService= documentRetrievalService;
         this.apiKey = apiKey != null ? apiKey.trim() : "";
+        this.guardrailService=guardrailService;
     }
 
     @Override
     public String generate(String question, String conversationId) {
+    	
+    	//Input Guardrail 
+    	String sanitizedQuestion = guardrailService.validateAndSanitizeInput(question);
 
      //   String apiKey = System.getenv("GROQ_API_KEY");
 
@@ -68,7 +75,7 @@ public class GroqAIProvider implements AIProvider {
 
         Map<String, Object> userMessage = new HashMap<>();
         userMessage.put("role", "user");
-        userMessage.put("content", question);
+        userMessage.put("content", sanitizedQuestion);
 
         messages.add(userMessage);
 
@@ -89,13 +96,16 @@ public class GroqAIProvider implements AIProvider {
         
         System.out.println("final messages::"+messages);
 
-        return processResponse(response, messages, headers);
+        String rawAnswer= processResponse(response, messages, headers);
+        
+        //output guardrail
+        return  guardrailService.validateOutput(rawAnswer);
     }
 
     // ----------------------------------------------------
     // Process Groq response
     // ----------------------------------------------------
-
+    @SuppressWarnings("unchecked")
     private String processResponse(
             Map<String, Object> response,
             List<Map<String, Object>> messages,
@@ -224,7 +234,7 @@ public class GroqAIProvider implements AIProvider {
     // ----------------------------------------------------
     // Execute employee functions
     // ----------------------------------------------------
-
+@SuppressWarnings("unchecked")
     private String executeTool(
             String functionName,
             String arguments) {
@@ -238,12 +248,16 @@ public class GroqAIProvider implements AIProvider {
                     objectMapper.readValue(
                             arguments,
                             Map.class);
+            
+            String currentUserRole = "ROLE_HR_ADMIN";
 
             System.out.println("function name only::"+functionName+" args::"+args);
             if ("findEmployeeByName".equals(functionName)) {
 
                 String name =
                         (String) args.get("name");
+                
+                guardrailService.validateToolCall(functionName, name, currentUserRole);
 
                 Optional<Employee> employee =
                         employeeService
@@ -268,6 +282,8 @@ public class GroqAIProvider implements AIProvider {
             if ("searchCompanyDocuments".equals(functionName)) {
 
                 String query = (String) args.get("query");
+                
+                guardrailService.validateToolCall(functionName, query, currentUserRole);
 
                 List<Map<String, Object>> chunks =
                         documentRetrievalService.search(query);
@@ -295,6 +311,8 @@ public class GroqAIProvider implements AIProvider {
 
                 Number salary =
                         (Number) args.get("salary");
+                
+                guardrailService.validateToolCall(functionName, salary, currentUserRole);
 
                 List<Employee> employees =
                         employeeService
@@ -325,10 +343,13 @@ public class GroqAIProvider implements AIProvider {
 
             return "Unknown function: " + functionName;
 
-        } catch (Exception e) {
+        } catch (GuardrailViolationException ge ) {
 
             return "Error executing employee function: "
-                    + e.getMessage();
+                    + ge.getMessage();
+        }
+        catch(Exception e) {
+        	return "error executing employee function: "+e.getMessage();
         }
         
     }
